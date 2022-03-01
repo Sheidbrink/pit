@@ -32,6 +32,8 @@ def main(args):
             print(diff(args.path, args.cmp, use_shell=args.use_shell))
         case 'save':
             save(args.tosave, config['core']['url'])
+        case 'restore':
+            restore(args.torestore, config['core']['url'])
         case _:
             print(list(parse_config().items()))
 
@@ -64,29 +66,54 @@ def save(tosave, savedir):
             if fn == Path(__file__).resolve():
                 log.warning(f'Refusing to save myself {fn}')
                 continue
+            if fn.is_symlink():
+                log.warning(f'Refusing to backup symlink {fn}')
+                continue
             # Write the file in content addressable fashion
+            fn = fn.resolve()
             log.info(f'Hashing {fn}')
             fhash = hash_content(fn)
-            abs_path = fn.resolve()
             new_path = savedir / fhash[:2] / fhash[2:]
-            if not new_path.exists():
-                log.info(f'Linking {fhash}')
-                move(fn, new_path)
-            else:
-                log.info(f'Already Exists {fhash}')
+
+            log.info(f'Moving {fn} -> {new_path}')
+            mode = fn.stat().st_mode
+            move(fn, new_path)
             # Update the index
-            time = datetime.fromtimestamp(abs_path.stat().st_mtime).isoformat()
-            entry = f'{time} {abs_path.stat().st_mode} {fhash} {abs_path}\n'
+            time = datetime.fromtimestamp(fn.stat().st_mtime).isoformat()
+            entry = f'{mode} {fhash} {fn}\n'
             if entry not in index:
                 # Write out the index
                 indexfd.write(entry)
+
+def restore(filename, savedir):
+    # TODO delete from the save if theres no more in the index?
+    filename, savedir = Path(filename).absolute(), Path(savedir).resolve()
+    index_path = savedir / 'index'
+    with open(index_path, 'r') as indexfd:
+        index = indexfd.readlines()
+    for index_line in index:
+        st_mode, fhash, path = index_line.split(maxsplit=3)
+        path = Path(path.strip())
+        if path != filename:
+            continue
+        path = Path(path)
+        saved_path = savedir / fhash[:2] / fhash[2:]
+
+        log.info(f'Restoring {path} from {saved_path}')
+        try:
+            shutil.copy(saved_path, path)
+        except shutil.SameFileError:
+            os.unlink(path)
+            shutil.copy(saved_path, path)
+        path.chmod(int(st_mode))
+        break
 
 def get_all_files(dirname, ignore_hidden=True):
     for dirpath, dirnames, filenames in os.walk(dirname):
         if ignore_hidden:
             for dirname in dirnames.copy():
                 if dirname.startswith('.'):
-                    log.debug(f'Skipping hidden dir {dirname}')
+                    log.warning(f'Skipping hidden dir {dirname}')
                     del dirnames[dirnames.index(dirname)]
         for fn in filenames:
             yield Path(dirpath) / fn
@@ -167,5 +194,8 @@ if __name__ == '__main__':
 
     savecmd = commands.add_parser('save')
     savecmd.add_argument('tosave')
+
+    restorecmd = commands.add_parser('restore')
+    restorecmd.add_argument('torestore')
 
     main(parser.parse_args())
